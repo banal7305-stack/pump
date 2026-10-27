@@ -1,0 +1,210 @@
+# 펌프 이상진단 에이전트 설정 (PRD v0.2)
+# 판정 기준·가중치는 모두 여기서 관리한다. 코드에 숫자를 하드코딩하지 않는다.
+
+data:
+  # 앞에서부터 확인해 필요한 시트가 모두 있는 첫 파일을 쓴다 (원본 5대 파일은 건너뜀)
+  paths: [더미데이터.xlsx, 더미데이터_확장.xlsx]
+  cache_dir: output/cache
+  output_dir: output
+
+# 항목별 등급: 0 정상 / 1 관찰 / 2 주의 / 3 경고 (PRD 5.3)
+# high: 값 > bounds[k] 이면 k+1 등급, low: 값 < bounds[k] 이면 k+1 등급
+# ratio: true 는 정격 대비 비율로 판정
+grades:
+  vibration:      {direction: high, ratio: false, bounds: [2.8, 4.5, 7.1]}
+  bearing_temp:   {direction: high, ratio: false, bounds: [65, 70, 80]}
+  current:        {direction: high, ratio: true,  bounds: [1.00, 1.05, 1.15]}
+  flow:           {direction: low,  ratio: true,  bounds: [0.90, 0.85]}
+  discharge:      {direction: low,  ratio: true,  bounds: [0.95, 0.88]}
+  discharge_high: {direction: high, ratio: true,  bounds: [1.05, 1.10], source: discharge}
+  suction:        {direction: low,  ratio: true,  bounds: [0.80, 0.70, 0.60]}
+
+# 입력 검증 (F1-6)
+validation:
+  min:
+    suction: -1.0             # 게이지압 기준 완전 진공(-1 bar)보다 낮을 수 없음
+  max_future_days: 30         # 데이터 마지막 시각보다 이만큼 뒤의 측정일시는 거부 (기준선·추세 근거 없음)
+  max:
+    vibration: 50
+    bearing_temp: 150
+    current_ratio: 3.0
+    flow_ratio: 2.0
+    discharge_ratio: 2.0
+    suction_ratio: 3.0
+  stopped_flow_ratio: 0.05      # 유량·전류가 정격의 5% 미만이면 정지 상태
+  stopped_current_ratio: 0.05
+
+# 기준선 (F2-3): 정상 범위로 운전한 행(라벨 미사용)의 펌프별 중앙값 + 시간대 효과 + 계절(전 펌프 일별) 보정
+baseline:
+  normal_range:
+    vibration_max: 2.8
+    bearing_temp_max: 65
+    current_ratio_max: 1.00
+    discharge_ratio: [0.95, 1.05]
+    suction_ratio_min: 0.80
+    flow_ratio_min: 0.85
+  min_std:            # 표준편차 하한 (과민 판정 방지)
+    vibration: 0.15
+    bearing_temp: 0.8
+    current: 0.008
+    flow: 0.008
+    discharge: 0.006
+    suction: 0.02
+  future_offset_days: 7   # 데이터 이후 시각은 최근 N일 계절 보정 평균 사용
+
+# 종합 상태 (F2-7): 이상지수 D = sqrt(Σ max(0, |z| - deadzone)^2)
+status:
+  deadzone: 2.0
+  watch_threshold: 1.6    # D 이상이면 이상징후
+  alarm_threshold: 10.0   # D 이상이면 이상
+  grade_watch: 2          # 항목 등급이 이 값 이상이면 최소 이상징후
+  grade_alarm: 3          # 항목 등급이 이 값 이상이면 이상
+
+# 추세 (F2-4)
+trend:
+  window_days: 7
+  min_points: 12
+  warn_vibration: 7.1
+  warn_bearing_temp: 80
+  speed_unit:             # 이 기울기(일 변화량)를 진행 속도 100점으로 본다
+    vibration: 0.3
+    bearing_temp: 1.0
+    current: 0.01
+    flow: 0.01
+    discharge: 0.01
+    suction: 0.03
+  eta_scores: [[3, 100], [7, 80], [14, 60], [30, 40]]   # 경고 도달 예상일 ≤ N일 → 점수
+
+# 오경보 판정 (F2-6)
+false_alarm:
+  history_points: 3          # 직전 N개 운전 포인트의 중앙값과 비교
+  jump:
+    vibration: 2.0           # mm/s
+    current: 0.05            # 정격 대비
+    flow: 0.08
+    discharge: 0.08
+    bearing_temp: 8
+    suction: 0.25
+  restart_points: 1          # 정지 직후 N개 포인트는 재기동 과도 구간
+
+# 알람 맥락 (F2-5)
+alarms:
+  context_days: 30
+  evidence_days: 7
+  threshold_codes: [VIB-H1, VIB-H2, TMP-H1, TMP-H2, CUR-H1, CUR-H2, FLW-L1, PRS-L1, PRS-H1, SUC-L1]
+  code_variable:
+    VIB-H1: vibration
+    VIB-H2: vibration
+    TMP-H1: bearing_temp
+    TMP-H2: bearing_temp
+    CUR-H1: current
+    CUR-H2: current
+    FLW-L1: flow
+    PRS-L1: discharge
+    PRS-H1: discharge
+    SUC-L1: suction
+  # 현장 알람 → 현장 징후 (알람명 키워드로 구분)
+  field_signs:
+    - {code: NOISE, keyword: 베어링, sign: 이상음(금속음)}
+    - {code: NOISE, keyword: 자갈, sign: 자갈 소리}
+    - {code: SEAL-LK, keyword: "", sign: 씰 누수}
+    - {code: COUP-T, keyword: "", sign: 커플링 발열}
+    - {code: MOT-T, keyword: "", sign: 모터 발열}
+
+field_signs: [씰 누수, 이상음(금속음), 자갈 소리, 커플링 발열, 모터 발열]
+
+# 원인 후보 (F3)
+diagnosis:
+  # 패턴 수준: 기준선 대비 변화량이 level1이면 ↑(1), level2이면 ↑↑(2)
+  # ratio 항목은 기준선 대비 상대 변화, 나머지는 절대 변화
+  pattern_levels:
+    vibration:    {level1: 0.8,  level2: 2.5}
+    bearing_temp: {level1: 6.0,  level2: 15.0}
+    current:      {level1: 0.03, level2: 0.12}
+    flow:         {level1: 0.04, level2: 0.10}
+    discharge:    {level1: 0.04, level2: 0.15}
+    suction:      {level1: 0.10, level2: 0.25}
+  key_weight: 1.5            # 지식베이스에서 변화가 있다고 한 항목의 가중치
+  # 형태 점수: z-score 방향 패턴(가장 큰 변화를 ↑↑로 정규화)을 비교해 초기 단계(변화량이 작을 때)도 구분
+  shape_weight: 0.5          # 최종 일치도 = (1-w)×크기 일치도 + w×형태 일치도
+  shape_deadzone: 1.5        # |z|가 이 값 이하인 변화는 형태 비교에서 0으로 본다
+  sign_bonus: 0.10           # 현장 징후 1개 일치
+  sign_penalty: 0.04         # 입력된 현장 징후가 그 고장모드와 무관할 때
+  alarm_bonus: 0.03          # 관련 알람코드 1종 (최대 alarm_bonus_max)
+  alarm_bonus_max: 0.06
+  history_bonus: 0.02        # 같은 펌프/같은 기종에 같은 고장 확인 이력
+  missing_penalty: 0.10      # 선택 입력(흡입압력, 베어링온도) 1개 누락 시 신뢰도 감소
+  top_n: 3
+  # 신뢰도 = 후보 간 점수 비중(softmax, 온도 T) × 적합도(점수/fit_reference, 최대 1) × 누락 보정
+  confidence_temperature: 0.1
+  fit_reference: 0.8
+  confidence_labels: [[0.60, 높음], [0.30, 중간], [0.0, 낮음]]
+  sign_modes:
+    씰 누수: [메카니컬씰 누설]
+    이상음(금속음): [베어링 열화]
+    자갈 소리: [캐비테이션/임펠러 마모]
+    커플링 발열: [축정렬 불량]
+    모터 발열: [모터 이상(권선/전원)]
+  alarm_modes:
+    SUC-L1: [캐비테이션/임펠러 마모]
+    PRS-H1: [배관 막힘/밸브 이상]
+    TMP-H1: [베어링 열화]
+    TMP-H2: [베어링 열화]
+    CUR-H2: [축정렬 불량, 모터 이상(권선/전원)]
+  # 정비이력 대상부품/조치내용 키워드 → 고장모드 (위에서부터 먼저 맞는 것)
+  work_order_modes:
+    - [캐비테이션, 캐비테이션/임펠러 마모]
+    - [스트레이너, 캐비테이션/임펠러 마모]
+    - [메카니컬씰, 메카니컬씰 누설]
+    - [베어링, 베어링 열화]
+    - [축정렬, 축정렬 불량]
+    - [커플링, 축정렬 불량]
+    - [임펠러, 임펠러 불평형/이물]
+    - [모터, 모터 이상(권선/전원)]
+    - [MCC, 모터 이상(권선/전원)]
+    - [체크밸브, 배관 막힘/밸브 이상]
+    - [배관, 배관 막힘/밸브 이상]
+  misdiagnosis_keyword: 오진단
+  misdiagnosis_days: 90
+
+# 추가 확인 항목 (F4)
+verification:
+  missing_items:
+    suction: "흡입압력 측정 (캐비테이션·씰 누설 구분에 필요)"
+    bearing_temp: "베어링온도 측정 (베어링 열화·축정렬 불량 구분에 필요)"
+    signs: "현장 징후 확인: 이상음·씰부 누수·커플링/모터 발열 (원인 구분 근거)"
+  discriminators:     # 1·2순위가 이 조합이면 앞쪽에 배치할 구별 항목
+    - modes: [베어링 열화, 축정렬 불량]
+      items: ["진동 스펙트럼: BPFO/BPFI(베어링) vs 축방향·2X 성분(축정렬)", "커플링 표면 온도(열화상)"]
+    - modes: [메카니컬씰 누설, 캐비테이션/임펠러 마모]
+      items: ["흡입압력·흡수정 수위 확인", "씰부 누수 육안 확인"]
+    - modes: [베어링 열화, 임펠러 불평형/이물]
+      items: ["베어링온도 추세 확인", "진동 1X 성분 확인"]
+    - modes: [축정렬 불량, 모터 이상(권선/전원)]
+      items: ["3상 전류 불평형 측정", "커플링 표면 온도(열화상)"]
+    - modes: [메카니컬씰 누설, 배관 막힘/밸브 이상]
+      items: ["토출밸브 개도·체크밸브 동작 확인", "씰부 누수 육안 확인"]
+    - modes: [캐비테이션/임펠러 마모, 임펠러 불평형/이물]
+      items: ["흡입 스트레이너 차압 확인", "흡입압력 추세 확인"]
+    - modes: [메카니컬씰 누설, 임펠러 불평형/이물]
+      items: ["씰부 누수 육안 확인", "진동 1X 성분 확인"]
+  max_items: 8
+
+# 우선순위 (F5)
+priority:
+  weights: {severity: 0.40, speed: 0.25, importance: 0.20, confidence: 0.15}
+  severity_by_grade: [10, 40, 70, 100]
+  severity_status_floor: {정상: 0, 이상징후: 40, 이상: 60}
+  neutral_speed: 50
+  default_importance: 50
+  levels: [[80, 즉시, 24시간 이내], [60, 긴급, 1주 이내], [40, 계획, 다음 정기정비], [0, 관찰, 추세 관찰]]
+
+# 보고서 (F6)
+report:
+  disclaimer: "본 보고서는 가상 데이터 기반 자동 진단 결과이며, 최종 판단은 현장 확인 후 내려야 합니다."
+llm:
+  enabled: true                # ANTHROPIC_API_KEY 등 인증 정보가 있을 때만 호출
+  model: claude-opus-5-5
+  effort: low
+  max_tokens: 2000
+  timeout_sec: 60
